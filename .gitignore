@@ -1,0 +1,8 @@
+dist/
+FastZapuskDirekta.zip
+.agents/
+node_modules/
+.env
+.env.*
+!.env.example
+*.log

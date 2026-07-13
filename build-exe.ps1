@@ -1,0 +1,48 @@
+$ErrorActionPreference = "Stop"
+
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$dist = Join-Path $root "dist"
+$runtime = Join-Path $dist "runtime"
+$source = Join-Path $root "tray-app\FastZapuskTray.cs"
+$compiler = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$codexNode = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\runtimes\cua_node\1b23c930bdf84ed6\bin\node.exe"
+$distNode = Join-Path $runtime "node.exe"
+
+if (-not (Test-Path $compiler)) {
+  throw "C# compiler not found: $compiler"
+}
+
+if (-not (Test-Path $distNode) -and -not (Test-Path $codexNode)) {
+  throw "Node runtime not found in dist or Codex runtime: $codexNode"
+}
+
+New-Item -ItemType Directory -Force -Path $dist, $runtime | Out-Null
+
+$exePath = Join-Path $dist "FastZapuskDirekta.exe"
+
+& $compiler `
+  /nologo `
+  /codepage:65001 `
+  /target:winexe `
+  /out:$exePath `
+  /reference:System.dll `
+  /reference:System.Drawing.dll `
+  /reference:System.Windows.Forms.dll `
+  $source
+
+if ($LASTEXITCODE -ne 0) {
+  throw "C# build failed with exit code $LASTEXITCODE"
+}
+
+Copy-Item -Force (Join-Path $root "server.js") (Join-Path $dist "server.js")
+Copy-Item -Force (Join-Path $root "index.html") (Join-Path $dist "index.html")
+Copy-Item -Force (Join-Path $root "key web.txt") (Join-Path $dist "key web.txt")
+Copy-Item -Force (Join-Path $root "minus.txt") (Join-Path $dist "minus.txt")
+Copy-Item -Force (Join-Path $root "kuh1.jpg") (Join-Path $dist "kuh1.jpg")
+Copy-Item -Force (Join-Path $root "kuh2.jpg") (Join-Path $dist "kuh2.jpg")
+
+if (-not (Test-Path $distNode)) {
+  Copy-Item -Force $codexNode $distNode
+}
+
+Write-Host "Done: $exePath"
