@@ -7,13 +7,15 @@ $source = Join-Path $root "tray-app\FastZapuskTray.cs"
 $compiler = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $codexNode = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\runtimes\cua_node\1b23c930bdf84ed6\bin\node.exe"
 $distNode = Join-Path $runtime "node.exe"
+$systemNodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+$systemNode = if ($systemNodeCommand) { $systemNodeCommand.Source } else { $null }
 
 if (-not (Test-Path $compiler)) {
   throw "C# compiler not found: $compiler"
 }
 
-if (-not (Test-Path $distNode) -and -not (Test-Path $codexNode)) {
-  throw "Node runtime not found in dist or Codex runtime: $codexNode"
+if (-not (Test-Path $distNode) -and -not $systemNode -and -not (Test-Path $codexNode)) {
+  throw "Node runtime not found. Install Node.js or place node.exe in dist\runtime."
 }
 
 New-Item -ItemType Directory -Force -Path $dist, $runtime | Out-Null
@@ -42,7 +44,8 @@ Copy-Item -Force (Join-Path $root "kuh1.jpg") (Join-Path $dist "kuh1.jpg")
 Copy-Item -Force (Join-Path $root "kuh2.jpg") (Join-Path $dist "kuh2.jpg")
 
 if (-not (Test-Path $distNode)) {
-  Copy-Item -Force $codexNode $distNode
+  $nodeSource = if ($systemNode) { $systemNode } else { $codexNode }
+  Copy-Item -Force $nodeSource $distNode
 }
 
 Write-Host "Done: $exePath"
