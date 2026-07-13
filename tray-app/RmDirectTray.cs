@@ -6,7 +6,7 @@ using System.Net;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace FastZapuskDirekta
+namespace RmDirect
 {
     internal static class Program
     {
@@ -30,7 +30,7 @@ namespace FastZapuskDirekta
             trayIcon = new NotifyIcon
             {
                 Icon = SystemIcons.Application,
-                Text = "Быстрый запуск РК по кухням",
+                Text = "rm-direct",
                 Visible = true,
                 ContextMenuStrip = BuildMenu()
             };
@@ -60,7 +60,7 @@ namespace FastZapuskDirekta
             {
                 MessageBox.Show(
                     "Не найден runtime\\node.exe или server.js рядом с приложением.",
-                    "Быстрый запуск РК по кухням",
+                    "rm-direct",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return;
@@ -89,7 +89,7 @@ namespace FastZapuskDirekta
             {
                 MessageBox.Show(
                     "Не удалось запустить сервер: " + error.Message,
-                    "Быстрый запуск РК по кухням",
+                    "rm-direct",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -163,7 +163,7 @@ namespace FastZapuskDirekta
             {
                 MessageBox.Show(
                     "Не удалось открыть страницу: " + error.Message,
-                    "Быстрый запуск РК по кухням",
+                    "rm-direct",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
