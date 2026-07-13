@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dist = Join-Path $root "dist"
 $runtime = Join-Path $dist "runtime"
-$source = Join-Path $root "tray-app\FastZapuskTray.cs"
+$source = Join-Path $root "tray-app\RmDirectTray.cs"
 $compiler = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $codexNode = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\runtimes\cua_node\1b23c930bdf84ed6\bin\node.exe"
 $distNode = Join-Path $runtime "node.exe"
@@ -20,7 +20,7 @@ if (-not (Test-Path $distNode) -and -not $systemNode -and -not (Test-Path $codex
 
 New-Item -ItemType Directory -Force -Path $dist, $runtime | Out-Null
 
-$exePath = Join-Path $dist "FastZapuskDirekta.exe"
+$exePath = Join-Path $dist "rm-direct.exe"
 
 & $compiler `
   /nologo `

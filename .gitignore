@@ -1,5 +1,5 @@
 dist/
-FastZapuskDirekta.zip
+*.zip
 .agents/
 node_modules/
 .env
