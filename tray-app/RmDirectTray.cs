@@ -10,12 +10,26 @@ namespace RmDirect
 {
     internal static class Program
     {
+        private const string SingleInstanceMutexName = @"Local\RmDirectSingleInstance";
+
         [STAThread]
         private static void Main()
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new TrayAppContext());
+            bool isFirstInstance;
+
+            using (var singleInstanceMutex = new Mutex(true, SingleInstanceMutexName, out isFirstInstance))
+            {
+                if (!isFirstInstance)
+                {
+                    TrayAppContext.OpenService();
+                    return;
+                }
+
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new TrayAppContext());
+                GC.KeepAlive(singleInstanceMutex);
+            }
         }
     }
 
@@ -149,7 +163,7 @@ namespace RmDirect
             }
         }
 
-        private static void OpenService()
+        internal static void OpenService()
         {
             try
             {
