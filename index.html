@@ -73,6 +73,59 @@
         -webkit-font-smoothing: antialiased;
       }
 
+      [hidden] {
+        display: none !important;
+      }
+
+      .auth-gate {
+        display: grid;
+        min-height: 100vh;
+        place-items: center;
+        padding: var(--space-6);
+      }
+
+      .auth-panel {
+        width: min(100%, 420px);
+        padding: var(--space-8);
+        border: 1px solid var(--line-soft);
+        border-radius: var(--radius-md);
+        background: var(--surface);
+        box-shadow: var(--shadow-float);
+      }
+
+      .auth-brand {
+        margin-bottom: var(--space-7);
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      .auth-panel h1 {
+        margin: 0 0 var(--space-2);
+        font-size: 28px;
+        line-height: 1.2;
+      }
+
+      .auth-panel > p {
+        margin: 0 0 var(--space-6);
+        color: var(--text-secondary);
+      }
+
+      .auth-fields {
+        display: grid;
+        gap: var(--space-5);
+      }
+
+      .auth-fields button {
+        width: 100%;
+      }
+
+      .auth-status {
+        min-height: 22px;
+        margin: var(--space-4) 0 0;
+        color: var(--danger);
+        font-size: 14px;
+      }
+
       button,
       input,
       select {
@@ -98,6 +151,7 @@
       .app-header-inner {
         display: flex;
         align-items: center;
+        justify-content: space-between;
         width: min(100%, 1600px);
         min-height: 72px;
         margin: 0 auto;
@@ -110,6 +164,23 @@
         font-weight: 650;
         line-height: 1.15;
         letter-spacing: 0;
+      }
+
+      .header-session {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
+      }
+
+      .session-user {
+        color: var(--text-secondary);
+        font-size: 14px;
+        white-space: nowrap;
+      }
+
+      .header-logout {
+        min-height: 36px;
+        padding: 0 var(--space-4);
       }
 
       main.workspace {
@@ -927,13 +998,54 @@
     </style>
   </head>
   <body>
-    <header class="app-header">
+    <section id="authGate" class="auth-gate" aria-labelledby="authHeading">
+      <form id="authForm" class="auth-panel">
+        <div class="auth-brand">rm-direct</div>
+        <h1 id="authHeading">Вход</h1>
+        <p>Используйте общую учётную запись компании.</p>
+        <div class="auth-fields">
+          <div class="field">
+            <label for="authUsername">Логин</label>
+            <input
+              id="authUsername"
+              name="username"
+              type="text"
+              autocomplete="username"
+              maxlength="128"
+              required
+              autofocus
+            />
+          </div>
+          <div class="field">
+            <label for="authPassword">Пароль</label>
+            <input
+              id="authPassword"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              maxlength="256"
+              required
+            />
+          </div>
+          <button id="authSubmit" type="submit">Войти</button>
+        </div>
+        <p id="authStatus" class="auth-status" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <header id="appHeader" class="app-header" hidden>
       <div class="app-header-inner">
         <h1>rm-direct</h1>
+        <div class="header-session">
+          <span id="sessionUser" class="session-user"></span>
+          <button id="logoutButton" class="secondary-button header-logout" type="button">
+            Выйти
+          </button>
+        </div>
       </div>
     </header>
 
-    <main class="workspace">
+    <main id="workspace" class="workspace" hidden>
       <div class="editor-column">
       <section class="top-bar" aria-labelledby="accountHeading">
         <div class="section-heading">
@@ -1358,6 +1470,16 @@
     </main>
 
     <script>
+      const authGate = document.querySelector("#authGate");
+      const authForm = document.querySelector("#authForm");
+      const authUsernameInput = document.querySelector("#authUsername");
+      const authPasswordInput = document.querySelector("#authPassword");
+      const authSubmitButton = document.querySelector("#authSubmit");
+      const authStatusText = document.querySelector("#authStatus");
+      const appHeader = document.querySelector("#appHeader");
+      const workspace = document.querySelector("#workspace");
+      const sessionUser = document.querySelector("#sessionUser");
+      const logoutButton = document.querySelector("#logoutButton");
       const tokenInput = document.querySelector("#token");
       const loadButton = document.querySelector("#loadClients");
       const clientInput = document.querySelector("#client");
@@ -1428,6 +1550,85 @@
         statusText.textContent = message;
         statusText.classList.remove("error");
         statusText.classList.add("success");
+      }
+
+      function setAuthBusy(isBusy) {
+        authUsernameInput.disabled = isBusy;
+        authPasswordInput.disabled = isBusy;
+        authSubmitButton.disabled = isBusy;
+      }
+
+      function showWorkspace(username) {
+        authGate.hidden = true;
+        appHeader.hidden = false;
+        workspace.hidden = false;
+        sessionUser.textContent = username;
+        authPasswordInput.value = "";
+        authStatusText.textContent = "";
+        setAuthBusy(false);
+      }
+
+      function showLogin(message = "", configured = true) {
+        authGate.hidden = false;
+        appHeader.hidden = true;
+        workspace.hidden = true;
+        sessionUser.textContent = "";
+        tokenInput.value = "";
+        loadedClients = [];
+        loadedGeoRegions = [];
+        selectedGeoRegionItems = [];
+        clientInput.value = "";
+        clientIdInput.value = "";
+        clientLoginInput.value = "";
+        clientInput.disabled = true;
+        geoSearchInput.value = "";
+        geoSearchInput.disabled = true;
+        previewPanel.hidden = true;
+        previewPanel.innerHTML = "";
+        authStatusText.textContent = message;
+        authUsernameInput.disabled = !configured;
+        authPasswordInput.disabled = !configured;
+        authSubmitButton.disabled = !configured;
+
+        if (configured) {
+          authUsernameInput.focus();
+        }
+      }
+
+      async function initializeAuth() {
+        try {
+          const response = await fetch("/api/auth/status", {
+            headers: { Accept: "application/json" },
+          });
+          const payload = await response.json();
+
+          if (!payload.configured) {
+            showLogin(
+              "Авторизация не настроена. Запустите set-auth.ps1 на основном компьютере.",
+              false,
+            );
+            return;
+          }
+
+          if (payload.authenticated) {
+            showWorkspace(payload.username);
+            return;
+          }
+
+          showLogin();
+        } catch (error) {
+          showLogin("Не удалось проверить авторизацию. Перезапустите сервис.", false);
+        }
+      }
+
+      async function authenticatedFetch(url, options) {
+        const response = await fetch(url, options);
+
+        if (response.status === 401) {
+          showLogin("Сессия завершена. Войдите снова.");
+        }
+
+        return response;
       }
 
       function getCampaignPayload() {
@@ -2039,7 +2240,7 @@
           setStatus("Загружаю клиентов...");
 
         try {
-          const response = await fetch("/api/direct-clients", {
+          const response = await authenticatedFetch("/api/direct-clients", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ token }),
@@ -2064,7 +2265,7 @@
           );
 
           try {
-            const geoResponse = await fetch("/api/geo-regions", {
+            const geoResponse = await authenticatedFetch("/api/geo-regions", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ token }),
@@ -2168,7 +2369,7 @@
             promotionObjectInput.value = payload.promotionObject;
           }
 
-          const response = await fetch("/api/preview-campaign", {
+          const response = await authenticatedFetch("/api/preview-campaign", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -2329,7 +2530,7 @@
             sendPayload.customAdTitles = customAdTitles;
           }
 
-          const response = await fetch("/api/create-campaign-draft", {
+          const response = await authenticatedFetch("/api/create-campaign-draft", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(sendPayload),
@@ -2449,6 +2650,45 @@
           filterGeoRegions();
         }
       });
+      authForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        setAuthBusy(true);
+        authStatusText.textContent = "Проверяю данные...";
+
+        try {
+          const response = await fetch("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username: authUsernameInput.value.trim(),
+              password: authPasswordInput.value,
+            }),
+          });
+          const payload = await response.json();
+
+          if (!response.ok) {
+            throw new Error(payload.error || "Не удалось выполнить вход.");
+          }
+
+          showWorkspace(payload.username);
+        } catch (error) {
+          authPasswordInput.value = "";
+          authStatusText.textContent = error.message;
+          authPasswordInput.focus();
+          setAuthBusy(false);
+        }
+      });
+      logoutButton.addEventListener("click", async () => {
+        logoutButton.disabled = true;
+
+        try {
+          await fetch("/api/auth/logout", { method: "POST" });
+        } finally {
+          logoutButton.disabled = false;
+          showLogin("Вы вышли из rm-direct.");
+        }
+      });
+      initializeAuth();
     </script>
   </body>
 </html>

@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,13 @@ const customImageExtensions = new Map([
   ["image/png", "png"],
   ["image/gif", "gif"],
 ]);
+const authConfigPath = path.join(root, "auth-config.json");
+const authCookieName = "rm_direct_session";
+const authSessionDurationSeconds = 12 * 60 * 60;
+const authLoginWindowMs = 15 * 60 * 1000;
+const authMaxLoginAttempts = 5;
+const authLoginAttempts = new Map();
+const authConfig = await loadAuthConfig();
 const networkAdGroupTemplates = [
   "Ключ (о): демонтаж, ремонт, дизайн проект",
   "Ключ (о): штукатурка, шпаклевка, грунтовка, выравнивание",
@@ -79,22 +87,291 @@ const networkAudienceInterestNames = [
   "Стиральные машины",
 ];
 
-function sendJson(res, statusCode, payload) {
+async function loadAuthConfig() {
+  try {
+    const rawConfig = await fs.readFile(authConfigPath, "utf8");
+    const config = JSON.parse(rawConfig);
+    const username = String(config.username || "").trim();
+    const password = config.password || {};
+    const iterations = Number(password.iterations);
+    const salt = Buffer.from(String(password.salt || ""), "base64");
+    const hash = Buffer.from(String(password.hash || ""), "base64");
+    const sessionSecret = Buffer.from(String(config.sessionSecret || ""), "base64");
+
+    if (!username || username.length > 128) {
+      throw new Error("Некорректный логин.");
+    }
+
+    if (
+      password.algorithm !== "pbkdf2-sha256" ||
+      !Number.isInteger(iterations) ||
+      iterations < 100000 ||
+      salt.length < 16 ||
+      hash.length < 32 ||
+      sessionSecret.length < 32
+    ) {
+      throw new Error("Некорректные параметры защиты пароля.");
+    }
+
+    return {
+      username,
+      password: { iterations, salt, hash },
+      sessionSecret,
+    };
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      console.warn("Authorization is not configured: auth-config.json is missing.");
+    } else {
+      console.error(`Authorization configuration error: ${error.message}`);
+    }
+
+    return null;
+  }
+}
+
+function sendJson(res, statusCode, payload, headers = {}) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    ...headers,
   });
   res.end(JSON.stringify(payload));
 }
 
 async function readJson(req) {
   const chunks = [];
+  let totalBytes = 0;
 
   for await (const chunk of req) {
+    totalBytes += chunk.length;
+
+    if (totalBytes > 16 * 1024 * 1024) {
+      throw new Error("Тело запроса слишком большое.");
+    }
+
     chunks.push(chunk);
   }
 
   const rawBody = Buffer.concat(chunks).toString("utf8");
   return rawBody ? JSON.parse(rawBody) : {};
+}
+
+function timingSafeStringEqual(left, right) {
+  const leftDigest = crypto.createHash("sha256").update(String(left)).digest();
+  const rightDigest = crypto.createHash("sha256").update(String(right)).digest();
+  return crypto.timingSafeEqual(leftDigest, rightDigest);
+}
+
+function derivePasswordHash(password) {
+  return new Promise((resolve, reject) => {
+    crypto.pbkdf2(
+      String(password),
+      authConfig.password.salt,
+      authConfig.password.iterations,
+      authConfig.password.hash.length,
+      "sha256",
+      (error, derivedKey) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve(derivedKey);
+      },
+    );
+  });
+}
+
+function parseCookies(req) {
+  return String(req.headers.cookie || "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .reduce((cookies, part) => {
+      const separatorIndex = part.indexOf("=");
+
+      if (separatorIndex > 0) {
+        cookies[part.slice(0, separatorIndex)] = decodeURIComponent(
+          part.slice(separatorIndex + 1),
+        );
+      }
+
+      return cookies;
+    }, {});
+}
+
+function createSessionToken() {
+  const payload = Buffer.from(
+    JSON.stringify({
+      username: authConfig.username,
+      expiresAt: Date.now() + authSessionDurationSeconds * 1000,
+      nonce: crypto.randomBytes(16).toString("base64url"),
+    }),
+  ).toString("base64url");
+  const signature = crypto
+    .createHmac("sha256", authConfig.sessionSecret)
+    .update(payload)
+    .digest("base64url");
+
+  return `${payload}.${signature}`;
+}
+
+function readSession(req) {
+  if (!authConfig) {
+    return null;
+  }
+
+  const token = parseCookies(req)[authCookieName];
+
+  if (!token) {
+    return null;
+  }
+
+  const [payload, signature, extraPart] = token.split(".");
+
+  if (!payload || !signature || extraPart) {
+    return null;
+  }
+
+  const expectedSignature = crypto
+    .createHmac("sha256", authConfig.sessionSecret)
+    .update(payload)
+    .digest("base64url");
+
+  if (!timingSafeStringEqual(signature, expectedSignature)) {
+    return null;
+  }
+
+  try {
+    const session = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+
+    if (
+      session.username !== authConfig.username ||
+      !Number.isFinite(session.expiresAt) ||
+      session.expiresAt <= Date.now()
+    ) {
+      return null;
+    }
+
+    return session;
+  } catch (error) {
+    return null;
+  }
+}
+
+function getLoginAttemptKey(req) {
+  return req.socket.remoteAddress || "local";
+}
+
+function getActiveLoginAttempt(req) {
+  const key = getLoginAttemptKey(req);
+  const attempt = authLoginAttempts.get(key);
+
+  if (attempt && attempt.resetAt <= Date.now()) {
+    authLoginAttempts.delete(key);
+    return null;
+  }
+
+  return attempt || null;
+}
+
+function registerFailedLogin(req) {
+  const key = getLoginAttemptKey(req);
+  const currentAttempt = getActiveLoginAttempt(req);
+  const attempt = currentAttempt || {
+    count: 0,
+    resetAt: Date.now() + authLoginWindowMs,
+  };
+
+  attempt.count += 1;
+  authLoginAttempts.set(key, attempt);
+  return attempt;
+}
+
+async function handleAuthLoginApi(req, res) {
+  if (!authConfig) {
+    sendJson(res, 503, {
+      error: "Авторизация не настроена. Запустите set-auth.ps1 на основном компьютере.",
+      configured: false,
+    });
+    return;
+  }
+
+  const activeAttempt = getActiveLoginAttempt(req);
+
+  if (activeAttempt?.count >= authMaxLoginAttempts) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((activeAttempt.resetAt - Date.now()) / 1000),
+    );
+    sendJson(
+      res,
+      429,
+      {
+        error: "Слишком много попыток входа. Попробуйте позже.",
+        retryAfterSeconds,
+      },
+      { "Retry-After": String(retryAfterSeconds) },
+    );
+    return;
+  }
+
+  try {
+    const payload = await readJson(req);
+    const username = String(payload.username || "").trim();
+    const password = String(payload.password || "");
+    const derivedHash = await derivePasswordHash(password);
+    const usernameMatches = timingSafeStringEqual(username, authConfig.username);
+    const passwordMatches = crypto.timingSafeEqual(
+      derivedHash,
+      authConfig.password.hash,
+    );
+
+    if (!usernameMatches || !passwordMatches) {
+      const attempt = registerFailedLogin(req);
+      const isBlocked = attempt.count >= authMaxLoginAttempts;
+      sendJson(res, isBlocked ? 429 : 401, {
+        error: isBlocked
+          ? "Слишком много попыток входа. Попробуйте через 15 минут."
+          : "Неверный логин или пароль.",
+      });
+      return;
+    }
+
+    authLoginAttempts.delete(getLoginAttemptKey(req));
+    const sessionToken = createSessionToken();
+    sendJson(
+      res,
+      200,
+      { authenticated: true, username: authConfig.username },
+      {
+        "Set-Cookie": `${authCookieName}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${authSessionDurationSeconds}`,
+      },
+    );
+  } catch (error) {
+    sendJson(res, 400, { error: "Не удалось обработать данные для входа." });
+  }
+}
+
+function handleAuthStatusApi(req, res) {
+  const session = readSession(req);
+  sendJson(res, 200, {
+    configured: Boolean(authConfig),
+    authenticated: Boolean(session),
+    username: session?.username || "",
+  });
+}
+
+function handleAuthLogoutApi(req, res) {
+  sendJson(
+    res,
+    200,
+    { authenticated: false },
+    {
+      "Set-Cookie": `${authCookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`,
+    },
+  );
 }
 
 function directHeaders(token, clientLogin = "") {
@@ -2257,27 +2534,30 @@ async function handlePreviewCampaignApi(req, res) {
 async function handleStatic(req, res) {
   try {
     const url = new URL(req.url, `http://${host}:${port}`);
-    const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname;
-    const relativePath = decodeURIComponent(requestedPath).replace(/^\/+/, "");
-    const filePath = path.resolve(root, relativePath);
+    const staticFiles = new Map([
+      ["/", { fileName: "index.html", contentType: "text/html; charset=utf-8" }],
+      ["/index.html", { fileName: "index.html", contentType: "text/html; charset=utf-8" }],
+      ["/kuh1.jpg", { fileName: "kuh1.jpg", contentType: "image/jpeg" }],
+      ["/kuh2.jpg", { fileName: "kuh2.jpg", contentType: "image/jpeg" }],
+    ]);
+    const staticFile = staticFiles.get(url.pathname);
 
-    if (!filePath.startsWith(root)) {
-      res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
-      res.end("Forbidden");
+    if (!staticFile) {
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("Not found");
       return;
     }
 
+    const filePath = path.join(root, staticFile.fileName);
     const body = await fs.readFile(filePath);
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType =
-      ext === ".css"
-        ? "text/css; charset=utf-8"
-        : ext === ".js"
-          ? "application/javascript; charset=utf-8"
-          : "text/html; charset=utf-8";
-
-    res.writeHead(200, { "Content-Type": contentType });
-    res.end(body);
+    res.writeHead(200, {
+      "Content-Type": staticFile.contentType,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+      "Referrer-Policy": "no-referrer",
+    });
+    res.end(req.method === "HEAD" ? undefined : body);
   } catch (error) {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Not found");
@@ -2285,22 +2565,44 @@ async function handleStatic(req, res) {
 }
 
 const server = http.createServer((req, res) => {
-  if (req.method === "POST" && req.url === "/api/direct-clients") {
+  const requestUrl = new URL(req.url, `http://${host}:${port}`);
+
+  if (req.method === "GET" && requestUrl.pathname === "/api/auth/status") {
+    handleAuthStatusApi(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/auth/login") {
+    handleAuthLoginApi(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/auth/logout") {
+    handleAuthLogoutApi(req, res);
+    return;
+  }
+
+  if (requestUrl.pathname.startsWith("/api/") && !readSession(req)) {
+    sendJson(res, 401, { error: "Требуется вход в rm-direct." });
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/direct-clients") {
     handleDirectClientsApi(req, res);
     return;
   }
 
-  if (req.method === "POST" && req.url === "/api/geo-regions") {
+  if (req.method === "POST" && requestUrl.pathname === "/api/geo-regions") {
     handleGeoRegionsApi(req, res);
     return;
   }
 
-  if (req.method === "POST" && req.url === "/api/create-campaign-draft") {
+  if (req.method === "POST" && requestUrl.pathname === "/api/create-campaign-draft") {
     handleCreateCampaignDraftApi(req, res);
     return;
   }
 
-  if (req.method === "POST" && req.url === "/api/preview-campaign") {
+  if (req.method === "POST" && requestUrl.pathname === "/api/preview-campaign") {
     handlePreviewCampaignApi(req, res);
     return;
   }
