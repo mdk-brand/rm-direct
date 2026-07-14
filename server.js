@@ -28,6 +28,7 @@ const authSessionDurationSeconds = 12 * 60 * 60;
 const authLoginWindowMs = 15 * 60 * 1000;
 const authMaxLoginAttempts = 5;
 const authLoginAttempts = new Map();
+const authRuntimeSessionSecret = crypto.randomBytes(32);
 const authConfig = await loadAuthConfig();
 const networkAdGroupTemplates = [
   "Ключ (о): демонтаж, ремонт, дизайн проект",
@@ -91,32 +92,32 @@ async function loadAuthConfig() {
   try {
     const rawConfig = await fs.readFile(authConfigPath, "utf8");
     const config = JSON.parse(rawConfig);
-    const username = String(config.username || "").trim();
-    const password = config.password || {};
-    const iterations = Number(password.iterations);
-    const salt = Buffer.from(String(password.salt || ""), "base64");
-    const hash = Buffer.from(String(password.hash || ""), "base64");
-    const sessionSecret = Buffer.from(String(config.sessionSecret || ""), "base64");
+    const readCredential = (name) => {
+      const credential = config[name] || {};
+      const iterations = Number(credential.iterations);
+      const salt = Buffer.from(String(credential.salt || ""), "base64");
+      const hash = Buffer.from(String(credential.hash || ""), "base64");
 
-    if (!username || username.length > 128) {
-      throw new Error("Некорректный логин.");
-    }
+      if (
+        credential.algorithm !== "pbkdf2-sha256" ||
+        !Number.isInteger(iterations) ||
+        iterations < 100000 ||
+        salt.length < 16 ||
+        hash.length < 32
+      ) {
+        throw new Error(`Некорректные параметры защиты: ${name}.`);
+      }
 
-    if (
-      password.algorithm !== "pbkdf2-sha256" ||
-      !Number.isInteger(iterations) ||
-      iterations < 100000 ||
-      salt.length < 16 ||
-      hash.length < 32 ||
-      sessionSecret.length < 32
-    ) {
-      throw new Error("Некорректные параметры защиты пароля.");
+      return { iterations, salt, hash };
+    };
+
+    if (config.version !== 2) {
+      throw new Error("Конфигурацию авторизации нужно создать заново.");
     }
 
     return {
-      username,
-      password: { iterations, salt, hash },
-      sessionSecret,
+      username: readCredential("username"),
+      password: readCredential("password"),
     };
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -163,13 +164,13 @@ function timingSafeStringEqual(left, right) {
   return crypto.timingSafeEqual(leftDigest, rightDigest);
 }
 
-function derivePasswordHash(password) {
+function deriveCredentialHash(value, credential) {
   return new Promise((resolve, reject) => {
     crypto.pbkdf2(
-      String(password),
-      authConfig.password.salt,
-      authConfig.password.iterations,
-      authConfig.password.hash.length,
+      String(value),
+      credential.salt,
+      credential.iterations,
+      credential.hash.length,
       "sha256",
       (error, derivedKey) => {
         if (error) {
@@ -204,13 +205,12 @@ function parseCookies(req) {
 function createSessionToken() {
   const payload = Buffer.from(
     JSON.stringify({
-      username: authConfig.username,
+      sessionId: crypto.randomBytes(16).toString("base64url"),
       expiresAt: Date.now() + authSessionDurationSeconds * 1000,
-      nonce: crypto.randomBytes(16).toString("base64url"),
     }),
   ).toString("base64url");
   const signature = crypto
-    .createHmac("sha256", authConfig.sessionSecret)
+    .createHmac("sha256", authRuntimeSessionSecret)
     .update(payload)
     .digest("base64url");
 
@@ -235,7 +235,7 @@ function readSession(req) {
   }
 
   const expectedSignature = crypto
-    .createHmac("sha256", authConfig.sessionSecret)
+    .createHmac("sha256", authRuntimeSessionSecret)
     .update(payload)
     .digest("base64url");
 
@@ -247,7 +247,8 @@ function readSession(req) {
     const session = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
 
     if (
-      session.username !== authConfig.username ||
+      typeof session.sessionId !== "string" ||
+      session.sessionId.length < 16 ||
       !Number.isFinite(session.expiresAt) ||
       session.expiresAt <= Date.now()
     ) {
@@ -321,10 +322,16 @@ async function handleAuthLoginApi(req, res) {
     const payload = await readJson(req);
     const username = String(payload.username || "").trim();
     const password = String(payload.password || "");
-    const derivedHash = await derivePasswordHash(password);
-    const usernameMatches = timingSafeStringEqual(username, authConfig.username);
+    const [derivedUsernameHash, derivedPasswordHash] = await Promise.all([
+      deriveCredentialHash(username, authConfig.username),
+      deriveCredentialHash(password, authConfig.password),
+    ]);
+    const usernameMatches = crypto.timingSafeEqual(
+      derivedUsernameHash,
+      authConfig.username.hash,
+    );
     const passwordMatches = crypto.timingSafeEqual(
-      derivedHash,
+      derivedPasswordHash,
       authConfig.password.hash,
     );
 
@@ -344,7 +351,7 @@ async function handleAuthLoginApi(req, res) {
     sendJson(
       res,
       200,
-      { authenticated: true, username: authConfig.username },
+      { authenticated: true, username: "Сотрудник" },
       {
         "Set-Cookie": `${authCookieName}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${authSessionDurationSeconds}`,
       },
@@ -359,7 +366,7 @@ function handleAuthStatusApi(req, res) {
   sendJson(res, 200, {
     configured: Boolean(authConfig),
     authenticated: Boolean(session),
-    username: session?.username || "",
+    username: session ? "Сотрудник" : "",
   });
 }
 
