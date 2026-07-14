@@ -16,78 +16,81 @@ function ConvertTo-PlainText {
   }
 }
 
-if (Test-Path $configPath) {
-  $answer = Read-Host "Конфигурация уже существует. Перезаписать её? (да/нет)"
-
-  if ($answer.Trim().ToLowerInvariant() -notin @("да", "д", "yes", "y")) {
-    Write-Host "Настройка отменена."
-    exit 0
-  }
-}
-
-$username = (Read-Host "Логин").Trim()
-
-if (-not $username -or $username.Length -gt 128) {
-  throw "Логин должен содержать от 1 до 128 символов."
-}
-
-$securePassword = Read-Host "Пароль (минимум 12 символов)" -AsSecureString
-$secureConfirmation = Read-Host "Повторите пароль" -AsSecureString
-$password = ConvertTo-PlainText $securePassword
-$confirmation = ConvertTo-PlainText $secureConfirmation
-
-try {
-  if ($password.Length -lt 12) {
-    throw "Пароль должен содержать минимум 12 символов."
-  }
-
-  if (-not [string]::Equals($password, $confirmation, [StringComparison]::Ordinal)) {
-    throw "Пароли не совпадают."
-  }
+function New-Pbkdf2Credential {
+  param([string]$Value)
 
   $salt = New-Object byte[] 16
-  $sessionSecret = New-Object byte[] 32
   $random = [Security.Cryptography.RandomNumberGenerator]::Create()
 
   try {
     $random.GetBytes($salt)
-    $random.GetBytes($sessionSecret)
   } finally {
     $random.Dispose()
   }
 
   $derive = [Security.Cryptography.Rfc2898DeriveBytes]::new(
-    $password,
+    $Value,
     $salt,
     $iterations,
     [Security.Cryptography.HashAlgorithmName]::SHA256
   )
 
   try {
-    $passwordHash = $derive.GetBytes(32)
+    $hash = $derive.GetBytes(32)
   } finally {
     $derive.Dispose()
   }
 
+  return [ordered]@{
+    algorithm = "pbkdf2-sha256"
+    iterations = $iterations
+    salt = [Convert]::ToBase64String($salt)
+    hash = [Convert]::ToBase64String($hash)
+  }
+}
+
+if (Test-Path $configPath) {
+  $answer = Read-Host "Authorization is already configured. Overwrite it? (yes/no)"
+
+  if ($answer.Trim().ToLowerInvariant() -notin @("yes", "y")) {
+    Write-Host "Setup cancelled."
+    exit 0
+  }
+}
+
+$username = (Read-Host "Login").Trim()
+
+if ($username.Length -lt 8 -or $username.Length -gt 128) {
+  throw "Login must contain between 8 and 128 characters."
+}
+
+$securePassword = Read-Host "Password (at least 16 characters)" -AsSecureString
+$secureConfirmation = Read-Host "Repeat password" -AsSecureString
+$password = ConvertTo-PlainText $securePassword
+$confirmation = ConvertTo-PlainText $secureConfirmation
+
+try {
+  if ($password.Length -lt 16) {
+    throw "Password must contain at least 16 characters."
+  }
+
+  if (-not [string]::Equals($password, $confirmation, [StringComparison]::Ordinal)) {
+    throw "Passwords do not match."
+  }
+
   $config = [ordered]@{
-    version = 1
-    username = $username
-    password = [ordered]@{
-      algorithm = "pbkdf2-sha256"
-      iterations = $iterations
-      salt = [Convert]::ToBase64String($salt)
-      hash = [Convert]::ToBase64String($passwordHash)
-    }
-    sessionSecret = [Convert]::ToBase64String($sessionSecret)
+    version = 2
+    username = (New-Pbkdf2Credential $username)
+    password = (New-Pbkdf2Credential $password)
   }
 
   $json = $config | ConvertTo-Json -Depth 4
   $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
   [IO.File]::WriteAllText($configPath, $json, $utf8WithoutBom)
 
-  Write-Host "Авторизация настроена."
-  Write-Host "Создан файл: $configPath"
-  Write-Host "Теперь запустите build-exe.ps1 для сборки внутренней версии."
+  Write-Host "Authorization configured."
+  Write-Host "Created: $configPath"
+  Write-Host "Run build-exe.ps1 to build the internal release."
 } finally {
   $password = $null
   $confirmation = $null
